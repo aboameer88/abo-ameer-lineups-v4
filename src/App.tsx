@@ -32,6 +32,7 @@ type BookingSlot = {
   tags?: string[];
   note?: string;
   paymentStatus?: "unpaid" | "paid";
+  sessionId?: string;
 };
 
 type TeamSlots = Record<TeamId, BookingSlot[]>;
@@ -45,14 +46,28 @@ type BookingRow = {
   tags: string[] | null;
   note: string | null;
   payment_status: string | null;
+  session_id: string | null;
 };
 
 type ViewMode = "booking" | "admin" | "share";
 
-// المراكز
+type MatchSettingsRow = {
+  id: number;
+  match_name: string | null;
+  stadium_name: string | null;
+  match_time: string | null;
+};
+
+// المراكز الأساسية
 const baseSlots: Omit<
   BookingSlot,
-  "booked" | "playerName" | "rating" | "tags" | "note" | "paymentStatus"
+  | "booked"
+  | "playerName"
+  | "rating"
+  | "tags"
+  | "note"
+  | "paymentStatus"
+  | "sessionId"
 >[] = [
   { key: "GK", label: "حارس مرمى", line: "GK" },
   { key: "LB", label: "ظهير أيسر", line: "DEF" },
@@ -65,28 +80,22 @@ const baseSlots: Omit<
   { key: "ST", label: "مهاجم صريح", line: "ATT" },
 ];
 
-// إحداثيات المراكز
+// إحداثيات المراكز (مع تعديل CAM للأسفل لتفادي التداخل)
 const slotCoords: Record<BookingPositionKey, { top: string; left: string }> = {
-  ST: { top: "10%", left: "50%" },
-  CAM: { top: "24%", left: "50%" },
-  CM1: { top: "38%", left: "32%" },
-  CM2: { top: "38%", left: "68%" },
-  LB: { top: "54%", left: "18%" },
-  CB1: { top: "58%", left: "38%" },
-  CB2: { top: "58%", left: "62%" },
-  RB: { top: "54%", left: "82%" },
-  GK: { top: "82%", left: "50%" },
+  ST: { top: "8%", left: "50%" },
+  CAM: { top: "30%", left: "50%" }, // نزلناه قليلاً
+  CM1: { top: "42%", left: "32%" },
+  CM2: { top: "42%", left: "68%" },
+  LB: { top: "60%", left: "18%" },
+  CB1: { top: "64%", left: "38%" },
+  CB2: { top: "64%", left: "62%" },
+  RB: { top: "60%", left: "82%" },
+  GK: { top: "86%", left: "50%" },
 };
 
-// بيانات الفريقين + صور القمصان
 const teamsMeta: Record<
   TeamId,
-  {
-    name: string;
-    colorName: string;
-    badgeClass: string;
-    shirtSrc: string;
-  }
+  { name: string; colorName: string; badgeClass: string; shirtSrc: string }
 > = {
   red: {
     name: "الفريق الأحمر",
@@ -104,7 +113,6 @@ const teamsMeta: Record<
 
 const GK_SHIRT_SRC = "/shirts/gk-shirt-3d.png";
 
-// حالة أولية للفرق
 const makeInitialTeamSlots = (): TeamSlots => ({
   red: baseSlots.map((slot) => ({
     ...slot,
@@ -114,6 +122,7 @@ const makeInitialTeamSlots = (): TeamSlots => ({
     tags: [],
     note: "",
     paymentStatus: "unpaid",
+    sessionId: "",
   })),
   green: baseSlots.map((slot) => ({
     ...slot,
@@ -123,6 +132,7 @@ const makeInitialTeamSlots = (): TeamSlots => ({
     tags: [],
     note: "",
     paymentStatus: "unpaid",
+    sessionId: "",
   })),
 });
 
@@ -151,11 +161,54 @@ const App: React.FC = () => {
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
 
-  // share view ref للتصدير كصورة
+  // Session ID لكل جهاز
+  const [sessionId, setSessionId] = useState<string>("");
+
+  // تفاصيل المباراة (تحفظ في Supabase)
+  const [matchName, setMatchName] = useState("ديربي الجمعة");
+  const [stadiumName, setStadiumName] = useState("ملعب Abo Ameer");
+  const [matchTime, setMatchTime] = useState("الجمعة • 9:00 مساءً");
+  const [matchSaveMessage, setMatchSaveMessage] = useState<string | null>(null);
+  const [matchSaving, setMatchSaving] = useState(false);
+
   const shareRef = useRef<HTMLDivElement | null>(null);
 
   const currentSlots = teamSlots[selectedTeam];
   const currentTeamMeta = teamsMeta[selectedTeam];
+
+  // توليد / استرجاع sessionId
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let sid = window.localStorage.getItem("abo_ameer_session_id");
+    if (!sid) {
+      if (window.crypto && "randomUUID" in window.crypto) {
+        sid = window.crypto.randomUUID();
+      } else {
+        sid = `sess_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+      }
+      window.localStorage.setItem("abo_ameer_session_id", sid);
+    }
+    setSessionId(sid);
+  }, []);
+
+  // هل لهذا الجهاز حجز حالي في أي فريق؟
+  const deviceBooking = useMemo(() => {
+    if (!sessionId) return null;
+    for (const team of ["red", "green"] as TeamId[]) {
+      for (const slot of teamSlots[team]) {
+        if (slot.booked && slot.sessionId === sessionId) {
+          return { team, slot };
+        }
+      }
+    }
+    return null;
+  }, [teamSlots, sessionId]);
+
+  const canCurrentDeviceCancel = (slot: BookingSlot) => {
+    if (!slot.booked) return false;
+    if (!slot.sessionId || !sessionId) return true;
+    return slot.sessionId === sessionId;
+  };
 
   // إحصائيات
   const stats = useMemo(() => {
@@ -172,7 +225,7 @@ const App: React.FC = () => {
     };
   }, [teamSlots]);
 
-  // تحميل من Supabase
+  // تحميل الحجوزات + تفاصيل المباراة من Supabase
   useEffect(() => {
     const loadFromSupabase = async () => {
       if (!isSupabaseConfigured || !supabase) {
@@ -183,55 +236,72 @@ const App: React.FC = () => {
         setDbStatus("loading");
         setDbErrorMessage(null);
 
-        const { data, error } = await supabase
+        // 1) الحجوزات
+        const { data: bookingsData, error: bookingsError } = await supabase
           .from("bookings")
           .select(
-            "id, team, position_key, player_name, rating, tags, note, payment_status"
+            "id, team, position_key, player_name, rating, tags, note, payment_status, session_id"
           );
 
-        if (error) {
-          console.error("Supabase load error:", error);
+        if (bookingsError) {
+          console.error("Supabase load bookings error:", bookingsError);
           setDbStatus("error");
-          setDbErrorMessage("تعذر الاتصال بقاعدة البيانات (Supabase).");
+          setDbErrorMessage("تعذر تحميل الحجوزات من Supabase.");
           return;
         }
 
-        if (!data) {
-          setDbStatus("ready");
-          return;
-        }
-
-        setTeamSlots(() => {
-          const next = makeInitialTeamSlots();
-          (data as BookingRow[]).forEach((row) => {
-            const team = row.team;
-            const pos = row.position_key;
-            if (next[team]) {
-              next[team] = next[team].map((slot) =>
-                slot.key === pos
-                  ? {
-                      ...slot,
-                      booked: true,
-                      playerName: row.player_name,
-                      rating: row.rating,
-                      tags: row.tags ?? [],
-                      note: row.note ?? "",
-                      paymentStatus:
-                        (row.payment_status as BookingSlot["paymentStatus"]) ??
-                        "unpaid",
-                    }
-                  : slot
-              );
-            }
+        if (bookingsData) {
+          setTeamSlots(() => {
+            const next = makeInitialTeamSlots();
+            (bookingsData as BookingRow[]).forEach((row) => {
+              const team = row.team;
+              const pos = row.position_key;
+              if (next[team]) {
+                next[team] = next[team].map((slot) =>
+                  slot.key === pos
+                    ? {
+                        ...slot,
+                        booked: true,
+                        playerName: row.player_name,
+                        rating: row.rating,
+                        tags: row.tags ?? [],
+                        note: row.note ?? "",
+                        paymentStatus:
+                          (row.payment_status as BookingSlot["paymentStatus"]) ??
+                          "unpaid",
+                        sessionId: row.session_id ?? "",
+                      }
+                    : slot
+                );
+              }
+            });
+            return next;
           });
-          return next;
-        });
+        }
+
+        // 2) إعدادات تفاصيل المباراة (match_settings)
+        try {
+          const { data: matchRow, error: matchError } = await supabase
+            .from("match_settings")
+            .select("id, match_name, stadium_name, match_time")
+            .eq("id", 1)
+            .maybeSingle();
+
+          if (!matchError && matchRow) {
+            const row = matchRow as MatchSettingsRow;
+            setMatchName(row.match_name || "ديربي الجمعة");
+            setStadiumName(row.stadium_name || "ملعب Abo Ameer");
+            setMatchTime(row.match_time || "الجمعة • 9:00 مساءً");
+          }
+        } catch (err) {
+          console.warn("match_settings not found or error, using defaults.");
+        }
 
         setDbStatus("ready");
       } catch (err) {
         console.error(err);
         setDbStatus("error");
-        setDbErrorMessage("حدث خطأ أثناء تحميل البيانات من Supabase.");
+        setDbErrorMessage("حدث خطأ أثناء الاتصال بقاعدة البيانات.");
       }
     };
 
@@ -251,11 +321,23 @@ const App: React.FC = () => {
   }, []);
 
   const handleOpenBooking = (key: BookingPositionKey) => {
+    if (deviceBooking) {
+      const isSameSlot =
+        deviceBooking.team === selectedTeam &&
+        deviceBooking.slot.key === key;
+
+      if (!isSameSlot) {
+        alert(
+          "لا يمكنك حجز أكثر من مركز في نفس الوقت (ولا في فريقين مختلفين).\nقم أولاً بإلغاء حجزك الحالي، ثم احجز مركزاً جديداً."
+        );
+        return;
+      }
+    }
+
     setSelectedKey(key);
     setTempName("");
   };
 
-  // حفظ حجز جديد
   const saveBookingToSupabase = async (
     team: TeamId,
     key: BookingPositionKey,
@@ -268,6 +350,7 @@ const App: React.FC = () => {
           team,
           position_key: key,
           player_name: playerName,
+          session_id: sessionId || null,
         },
         {
           onConflict: "team,position_key",
@@ -279,7 +362,6 @@ const App: React.FC = () => {
     }
   };
 
-  // تحديث تفاصيل لاعب (Rating/Tags/Note/Payment)
   const updateBookingDetails = async (
     team: TeamId,
     key: BookingPositionKey,
@@ -318,7 +400,6 @@ const App: React.FC = () => {
     }
   };
 
-  // حذف الحجز
   const deleteBookingFromSupabase = async (
     team: TeamId,
     key: BookingPositionKey
@@ -342,7 +423,9 @@ const App: React.FC = () => {
     setTeamSlots((prev) => {
       const updated: TeamSlots = { ...prev };
       updated[selectedTeam] = updated[selectedTeam].map((s) =>
-        s.key === selectedKey ? { ...s, booked: true, playerName } : s
+        s.key === selectedKey
+          ? { ...s, booked: true, playerName, sessionId }
+          : s
       );
       return updated;
     });
@@ -353,7 +436,18 @@ const App: React.FC = () => {
     setTempName("");
   };
 
-  const handleCancelBooking = async (team: TeamId, key: BookingPositionKey) => {
+  const handleCancelBooking = async (
+    team: TeamId,
+    key: BookingPositionKey,
+    opts?: { force?: boolean }
+  ) => {
+    const slot = teamSlots[team].find((s) => s.key === key);
+
+    if (!opts?.force && slot?.sessionId && sessionId && slot.sessionId !== sessionId) {
+      alert("❌ لا يمكنك إلغاء حجز لاعب آخر.");
+      return;
+    }
+
     setTeamSlots((prev) => {
       const updated: TeamSlots = { ...prev };
       updated[team] = updated[team].map((s) =>
@@ -366,6 +460,7 @@ const App: React.FC = () => {
               tags: [],
               note: "",
               paymentStatus: "unpaid",
+              sessionId: "",
             }
           : s
       );
@@ -381,7 +476,6 @@ const App: React.FC = () => {
     setTempName("");
   };
 
-  // تسجيل الدخول للمسؤول
   const handleAdminLogin = async (e: FormEvent) => {
     e.preventDefault();
     if (!isSupabaseConfigured || !supabase) {
@@ -421,13 +515,44 @@ const App: React.FC = () => {
       .map((t) => t.trim())
       .filter(Boolean);
 
-  // تصدير التشكيلة كصورة
+  // حفظ تفاصيل المباراة في Supabase
+  const handleSaveMatchSettings = async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setMatchSaveMessage("Supabase غير مفعّل، لن يتم الحفظ.");
+      return;
+    }
+    try {
+      setMatchSaving(true);
+      setMatchSaveMessage(null);
+      const { error } = await supabase.from("match_settings").upsert(
+        {
+          id: 1,
+          match_name: matchName,
+          stadium_name: stadiumName,
+          match_time: matchTime,
+        },
+        { onConflict: "id" }
+      );
+      if (error) {
+        console.error("match_settings upsert error:", error);
+        setMatchSaveMessage("❌ تعذّر حفظ تفاصيل المباراة.");
+      } else {
+        setMatchSaveMessage("✅ تم حفظ تفاصيل المباراة بنجاح.");
+      }
+    } catch (err) {
+      console.error("match_settings upsert exception:", err);
+      setMatchSaveMessage("❌ حدث خطأ أثناء حفظ التفاصيل.");
+    } finally {
+      setMatchSaving(false);
+    }
+  };
+
   const handleExportImage = async () => {
     if (!shareRef.current) return;
     try {
       const canvas = await html2canvas(shareRef.current, {
         useCORS: true,
-        backgroundColor: "#020617", // slate-950
+        backgroundColor: "#020617",
         scale: window.devicePixelRatio > 1 ? 2 : 1.5,
       });
       const link = document.createElement("a");
@@ -442,7 +567,7 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50">
-      {/* Header */}
+      {/* HEADER */}
       <header className="border-b border-slate-800 bg-slate-950/80 sticky top-0 z-20">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -458,7 +583,6 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {/* Switch between modes */}
           <div className="flex items-center gap-2 text-xs">
             <button
               type="button"
@@ -497,7 +621,7 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* BOOKING VIEW */}
+      {/* ===================== صفحة الحجز ===================== */}
       {viewMode === "booking" && (
         <main className="max-w-6xl mx-auto px-4 py-6 md:py-10">
           <h1 className="text-xl md:text-2xl font-semibold mb-2">
@@ -508,6 +632,19 @@ const App: React.FC = () => {
             باسم اللاعب أسفل القميص. يتم حفظ البيانات في Supabase إذا تم
             إعدادها.
           </p>
+
+          <div className="mb-3 text-xs">
+            {deviceBooking && (
+              <div className="inline-flex items-center gap-2 px-3 py-2 rounded-full bg-slate-900 border border-slate-700 text-slate-300">
+                لديك حجز حالي في{" "}
+                <span className="font-semibold text-emerald-300">
+                  {teamsMeta[deviceBooking.team].name} –{" "}
+                  {deviceBooking.slot.label}
+                </span>
+                . لإختيار مركز آخر، قم أولاً بإلغاء هذا الحجز.
+              </div>
+            )}
+          </div>
 
           <div className="mb-6 text-xs">
             {dbStatus === "disabled" && (
@@ -533,7 +670,7 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Summary bar */}
+          {/* شريط الإحصائيات */}
           <div className="flex flex-wrap items-center gap-3 mb-5 text-xs">
             <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-slate-900 border border-slate-800">
               <span className="text-slate-400">الفريق الأحمر:</span>
@@ -556,32 +693,32 @@ const App: React.FC = () => {
           </div>
 
           <section className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)_260px] gap-4">
-            {/* LEFT: info */}
-            <aside className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-4 order-2 lg:order-1">
+            {/* تفاصيل المباراة (عرض فقط) */}
+            <aside className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-3 order-2 lg:order-1">
               <h2 className="text-sm font-semibold mb-1">تفاصيل المباراة</h2>
               <div className="space-y-2 text-xs">
                 <div className="flex items-center justify-between bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-2">
                   <span className="text-slate-400">اسم المباراة</span>
                   <span className="font-semibold text-slate-100">
-                    ديربي الجمعة
+                    {matchName}
                   </span>
                 </div>
                 <div className="flex items-center justify-between bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-2">
                   <span className="text-slate-400">الملعب</span>
                   <span className="font-semibold text-slate-100">
-                    ملعب Abo Ameer
+                    {stadiumName}
                   </span>
                 </div>
                 <div className="flex items-center justify-between bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-2">
                   <span className="text-slate-400">الوقت</span>
                   <span className="font-semibold text-slate-100">
-                    الجمعة • 9:00 مساءً
+                    {matchTime}
                   </span>
                 </div>
               </div>
             </aside>
 
-            {/* CENTER: pitch */}
+            {/* الملعب */}
             <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 order-1 lg:order-2">
               <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
                 <div className="flex items-center gap-2">
@@ -613,7 +750,7 @@ const App: React.FC = () => {
               </div>
 
               <div
-                className="relative flex-1 min-h-[600px] md:min-h-[720px] lg:min-h-[600px] rounded-2xl overflow-hidden bg-black"
+                className="relative flex-1 min-h-[680px] md:min-h-[780px] lg:min-h-[640px] rounded-2xl overflow-hidden bg-black"
                 style={{
                   backgroundImage: "url('/pitch/pitch-top-view-mobile.png')",
                   backgroundSize: "cover",
@@ -639,17 +776,17 @@ const App: React.FC = () => {
                         transform: "translate(-50%, -50%)",
                       }}
                     >
-                      <div className="w-14 h-14 rounded-full flex items-center justify-center bg-black/40 shadow-lg">
+                      <div className="w-14 h-14 md:w-16 md:h-16 rounded-full flex items-center justify-center bg-black/40 shadow-lg">
                         <img
                           src={shirtSrc}
                           alt={`قميص ${currentTeamMeta.name} – ${slot.key}`}
-                          className="w-11 h-11 object-contain drop-shadow-[0_0_10px_rgba(0,0,0,0.9)]"
+                          className="w-11 h-11 md:w-12 md:h-12 object-contain drop-shadow-[0_0_10px_rgba(0,0,0,0.9)]"
                         />
                       </div>
                       <span className="mt-1 text-[11px] text-white font-semibold bg-black/40 px-2 py-0.5 rounded-full">
                         {slot.label}
                       </span>
-                      <span className="mt-0.5 text-[10px] text-slate-200 bg-black/40 px-2 py-0.5 rounded-full min-h-[1.5rem] flex items-center">
+                      <span className="mt-0.5 text-[10px] text-slate-200 bg-black/40 px-2 py-0.5 rounded-full min-h-[1.5rem] flex items-center text-center">
                         {booked
                           ? `اللاعب: ${slot.playerName}`
                           : "المركز متاح للحجز"}
@@ -663,7 +800,7 @@ const App: React.FC = () => {
                           احجز هذا المركز
                         </button>
                       )}
-                      {booked && (
+                      {booked && canCurrentDeviceCancel(slot) && (
                         <button
                           type="button"
                           onClick={() =>
@@ -680,7 +817,7 @@ const App: React.FC = () => {
               </div>
             </section>
 
-            {/* RIGHT: quick list */}
+            {/* قائمة المراكز السريعة */}
             <aside className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 order-3 lg:order-3">
               <div className="flex items-center justify-between mb-1">
                 <h2 className="text-sm font-semibold">
@@ -766,7 +903,7 @@ const App: React.FC = () => {
         </main>
       )}
 
-      {/* ADMIN VIEW */}
+      {/* ===================== لوحة الإدارة ===================== */}
       {viewMode === "admin" && (
         <main className="max-w-6xl mx-auto px-4 py-6 md:py-10">
           <h1 className="text-xl md:text-2xl font-semibold mb-2">
@@ -774,7 +911,7 @@ const App: React.FC = () => {
           </h1>
           <p className="text-sm text-slate-400 mb-4">
             هذه الصفحة للمسؤول فقط: تعديل Rating / Tags / الملاحظات / حالة
-            الدفع لكل مركز، بالإضافة إلى إلغاء الحجوزات.
+            الدفع لكل مركز، بالإضافة إلى إلغاء الحجوزات وإدارة تفاصيل المباراة.
           </p>
 
           {!isAdminLoggedIn && (
@@ -843,6 +980,71 @@ const App: React.FC = () => {
                   تسجيل الخروج
                 </button>
               </div>
+
+              {/* إعدادات تفاصيل المباراة (تحفظ في Supabase) */}
+              <section className="mb-6 bg-slate-900/70 border border-slate-800 rounded-2xl p-4 text-xs max-w-xl">
+                <h2 className="text-sm font-semibold mb-2">
+                  إعدادات تفاصيل المباراة
+                </h2>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  هنا يمكنك تعديل اسم المباراة والملعب والوقت. هذه القيم تظهر في
+                  صفحة الحجز وصفحة عرض التشكيلة، ولا يمكن للمستخدمين العاديين
+                  تعديلها.
+                </p>
+                <div className="space-y-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-slate-300 text-[11px]">
+                      اسم المباراة
+                    </label>
+                    <input
+                      value={matchName}
+                      onChange={(e) => setMatchName(e.target.value)}
+                      className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs focus:outline-none focus:border-blue-500"
+                      placeholder="مثال: ديربي الجمعة"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-slate-300 text-[11px]">
+                      اسم الملعب
+                    </label>
+                    <input
+                      value={stadiumName}
+                      onChange={(e) => setStadiumName(e.target.value)}
+                      className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs focus:outline-none focus:border-blue-500"
+                      placeholder="مثال: ملعب Abo Ameer"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-slate-300 text-[11px]">
+                      وقت المباراة
+                    </label>
+                    <input
+                      value={matchTime}
+                      onChange={(e) => setMatchTime(e.target.value)}
+                      className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs focus:outline-none focus:border-blue-500"
+                      placeholder="مثال: الجمعة • 9:00 مساءً"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={handleSaveMatchSettings}
+                      disabled={matchSaving}
+                      className="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-[11px] font-semibold"
+                    >
+                      {matchSaving
+                        ? "جارٍ الحفظ..."
+                        : "حفظ تفاصيل المباراة في Supabase"}
+                    </button>
+                    {matchSaveMessage && (
+                      <span className="text-[11px] text-slate-300">
+                        {matchSaveMessage}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </section>
 
               <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
                 {(["red", "green"] as TeamId[]).map((team) => {
@@ -983,7 +1185,9 @@ const App: React.FC = () => {
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        handleCancelBooking(team, slot.key)
+                                        handleCancelBooking(team, slot.key, {
+                                          force: true,
+                                        })
                                       }
                                       className="text-[10px] px-2 py-1 rounded-full bg-slate-900 border border-red-500/70 text-red-300 hover:bg-red-500/20"
                                     >
@@ -1011,7 +1215,7 @@ const App: React.FC = () => {
         </main>
       )}
 
-      {/* SHARE VIEW */}
+      {/* ===================== صفحة المشاركة ===================== */}
       {viewMode === "share" && (
         <main className="max-w-5xl mx-auto px-4 py-6 md:py-10">
           <h1 className="text-xl md:text-2xl font-semibold mb-2">
@@ -1069,10 +1273,13 @@ const App: React.FC = () => {
             <div className="flex items-center justify-between text-[11px] text-slate-300 mb-3">
               <div className="flex flex-col">
                 <span className="font-semibold text-slate-100">
-                  Abo Ameer Lineups
+                  {matchName}
                 </span>
                 <span className="text-slate-400">
                   {currentTeamMeta.name} • خطة 4–3–1 + حارس
+                </span>
+                <span className="text-slate-500 text-[10px]">
+                  {stadiumName} – {matchTime}
                 </span>
               </div>
               <div className="text-right">
@@ -1080,7 +1287,11 @@ const App: React.FC = () => {
                   إجمالي اللاعبين المحجوزين:
                 </span>
                 <span className="font-semibold text-slate-100">
-                  {teamSlots[selectedTeam].filter((s) => s.booked).length}/9
+                  {
+                    teamSlots[selectedTeam].filter((s) => s.booked)
+                      .length
+                  }
+                  /9
                 </span>
               </div>
             </div>
@@ -1120,7 +1331,7 @@ const App: React.FC = () => {
                     <span className="mt-1 text-[11px] font-semibold text-white bg-black/45 px-2 py-0.5 rounded-full">
                       {slot.label}
                     </span>
-                    <span className="mt-0.5 text-[11px] text-amber-100 bg-black/45 px-2 py-0.5 rounded-full min-h-[1.6rem] flex items-center">
+                    <span className="mt-0.5 text-[11px] text-amber-100 bg-black/45 px-2 py-0.5 rounded-full min-h-[1.6rem] flex items-center text-center">
                       {booked
                         ? `اللاعب: ${slot.playerName}`
                         : "غير محجوز حتى الآن"}
@@ -1151,7 +1362,7 @@ const App: React.FC = () => {
 
             <div className="mt-3 text-[10px] text-slate-500 flex items-center justify-between">
               <span>تم إنشاء هذه التشكيلة عبر منصة Abo Ameer.</span>
-              <span>abo-ameer.com (نموذج واجهة)</span>
+              <span>نموذج واجهة – abo ameer lineups</span>
             </div>
           </div>
         </main>
