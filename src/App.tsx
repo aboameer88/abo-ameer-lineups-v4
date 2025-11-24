@@ -58,16 +58,21 @@ type MatchSettingsRow = {
   match_time: string | null;
 };
 
-// المراكز الأساسية
+type BenchRow = {
+  id: number;
+  player_name: string;
+  session_id: string | null;
+};
+
+type BenchPlayer = {
+  id: number;
+  playerName: string;
+  sessionId?: string | null;
+};
+
 const baseSlots: Omit<
   BookingSlot,
-  | "booked"
-  | "playerName"
-  | "rating"
-  | "tags"
-  | "note"
-  | "paymentStatus"
-  | "sessionId"
+  "booked" | "playerName" | "rating" | "tags" | "note" | "paymentStatus" | "sessionId"
 >[] = [
   { key: "GK", label: "حارس مرمى", line: "GK" },
   { key: "LB", label: "ظهير أيسر", line: "DEF" },
@@ -80,10 +85,9 @@ const baseSlots: Omit<
   { key: "ST", label: "مهاجم صريح", line: "ATT" },
 ];
 
-// إحداثيات المراكز (مع تعديل CAM للأسفل لتفادي التداخل)
 const slotCoords: Record<BookingPositionKey, { top: string; left: string }> = {
   ST: { top: "8%", left: "50%" },
-  CAM: { top: "30%", left: "50%" }, // نزلناه قليلاً
+  CAM: { top: "30%", left: "50%" },
   CM1: { top: "42%", left: "32%" },
   CM2: { top: "42%", left: "68%" },
   LB: { top: "60%", left: "18%" },
@@ -140,12 +144,14 @@ const ratingOptions = [10, 9, 8, 7, 6, 5];
 
 const App: React.FC = () => {
   const [teamSlots, setTeamSlots] = useState<TeamSlots>(makeInitialTeamSlots);
+  const [bench, setBench] = useState<BenchPlayer[]>([]);
   const [selectedTeam, setSelectedTeam] = useState<TeamId>("red");
 
   const [tempName, setTempName] = useState("");
-  const [selectedKey, setSelectedKey] = useState<BookingPositionKey | null>(
-    null
-  );
+  const [selectedKey, setSelectedKey] = useState<BookingPositionKey | null>(null);
+
+  const [isBenchModalOpen, setIsBenchModalOpen] = useState(false);
+  const [benchTempName, setBenchTempName] = useState("");
 
   const [dbStatus, setDbStatus] = useState<
     "idle" | "loading" | "ready" | "error" | "disabled"
@@ -154,17 +160,14 @@ const App: React.FC = () => {
 
   const [viewMode, setViewMode] = useState<ViewMode>("booking");
 
-  // Auth
   const [adminEmail, setAdminEmail] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
 
-  // Session ID لكل جهاز
   const [sessionId, setSessionId] = useState<string>("");
 
-  // تفاصيل المباراة (تحفظ في Supabase)
   const [matchName, setMatchName] = useState("ديربي الجمعة");
   const [stadiumName, setStadiumName] = useState("ملعب Abo Ameer");
   const [matchTime, setMatchTime] = useState("الجمعة • 9:00 مساءً");
@@ -176,7 +179,6 @@ const App: React.FC = () => {
   const currentSlots = teamSlots[selectedTeam];
   const currentTeamMeta = teamsMeta[selectedTeam];
 
-  // توليد / استرجاع sessionId
   useEffect(() => {
     if (typeof window === "undefined") return;
     let sid = window.localStorage.getItem("abo_ameer_session_id");
@@ -191,7 +193,6 @@ const App: React.FC = () => {
     setSessionId(sid);
   }, []);
 
-  // هل لهذا الجهاز حجز حالي في أي فريق؟
   const deviceBooking = useMemo(() => {
     if (!sessionId) return null;
     for (const team of ["red", "green"] as TeamId[]) {
@@ -204,13 +205,23 @@ const App: React.FC = () => {
     return null;
   }, [teamSlots, sessionId]);
 
+  const deviceBenchEntry = useMemo(() => {
+    if (!sessionId) return null;
+    return bench.find((b) => b.sessionId === sessionId) ?? null;
+  }, [bench, sessionId]);
+
   const canCurrentDeviceCancel = (slot: BookingSlot) => {
     if (!slot.booked) return false;
     if (!slot.sessionId || !sessionId) return true;
     return slot.sessionId === sessionId;
   };
 
-  // إحصائيات
+  const canCurrentDeviceCancelBench = (player: BenchPlayer) => {
+    if (!sessionId) return false;
+    if (!player.sessionId) return true;
+    return player.sessionId === sessionId;
+  };
+
   const stats = useMemo(() => {
     const build = (team: TeamId) => {
       const slots = teamSlots[team];
@@ -225,18 +236,17 @@ const App: React.FC = () => {
     };
   }, [teamSlots]);
 
-  // تحميل الحجوزات + تفاصيل المباراة من Supabase
   useEffect(() => {
     const loadFromSupabase = async () => {
       if (!isSupabaseConfigured || !supabase) {
         setDbStatus("disabled");
         return;
       }
+
       try {
         setDbStatus("loading");
         setDbErrorMessage(null);
 
-        // 1) الحجوزات
         const { data: bookingsData, error: bookingsError } = await supabase
           .from("bookings")
           .select(
@@ -279,7 +289,6 @@ const App: React.FC = () => {
           });
         }
 
-        // 2) إعدادات تفاصيل المباراة (match_settings)
         try {
           const { data: matchRow, error: matchError } = await supabase
             .from("match_settings")
@@ -297,6 +306,25 @@ const App: React.FC = () => {
           console.warn("match_settings not found or error, using defaults.");
         }
 
+        try {
+          const { data: benchData, error: benchError } = await supabase
+            .from("bench")
+            .select("id, player_name, session_id")
+            .order("id", { ascending: true });
+
+          if (!benchError && benchData) {
+            setBench(
+              (benchData as BenchRow[]).map((row) => ({
+                id: row.id,
+                playerName: row.player_name,
+                sessionId: row.session_id,
+              }))
+            );
+          }
+        } catch (err) {
+          console.warn("bench table not found or error, starting empty bench.");
+        }
+
         setDbStatus("ready");
       } catch (err) {
         console.error(err);
@@ -308,7 +336,6 @@ const App: React.FC = () => {
     loadFromSupabase();
   }, []);
 
-  // استرجاع جلسة المسؤول
   useEffect(() => {
     const checkSession = async () => {
       if (!isSupabaseConfigured || !supabase) return;
@@ -334,6 +361,13 @@ const App: React.FC = () => {
       }
     }
 
+    if (deviceBenchEntry) {
+      alert(
+        "لا يمكنك حجز مركز أساسي وأنت مسجل في قائمة الاحتياط.\nقم أولاً بإلغاء مقعد الاحتياط الخاص بك."
+      );
+      return;
+    }
+
     setSelectedKey(key);
     setTempName("");
   };
@@ -341,7 +375,8 @@ const App: React.FC = () => {
   const saveBookingToSupabase = async (
     team: TeamId,
     key: BookingPositionKey,
-    playerName: string
+    playerName: string,
+    sessionOverride?: string | null
   ) => {
     if (!isSupabaseConfigured || !supabase) return;
     try {
@@ -350,7 +385,7 @@ const App: React.FC = () => {
           team,
           position_key: key,
           player_name: playerName,
-          session_id: sessionId || null,
+          session_id: sessionOverride ?? sessionId ?? null,
         },
         {
           onConflict: "team,position_key",
@@ -420,6 +455,13 @@ const App: React.FC = () => {
     if (!selectedKey || !tempName.trim()) return;
     const playerName = tempName.trim();
 
+    if (deviceBenchEntry) {
+      alert(
+        "لا يمكنك حجز مركز أساسي وأنت مسجل في قائمة الاحتياط.\nقم أولاً بإلغاء مقعد الاحتياط الخاص بك."
+      );
+      return;
+    }
+
     setTeamSlots((prev) => {
       const updated: TeamSlots = { ...prev };
       updated[selectedTeam] = updated[selectedTeam].map((s) =>
@@ -442,11 +484,19 @@ const App: React.FC = () => {
     opts?: { force?: boolean }
   ) => {
     const slot = teamSlots[team].find((s) => s.key === key);
+    if (!slot) return;
 
-    if (!opts?.force && slot?.sessionId && sessionId && slot.sessionId !== sessionId) {
+    if (
+      !opts?.force &&
+      slot.sessionId &&
+      sessionId &&
+      slot.sessionId !== sessionId
+    ) {
       alert("❌ لا يمكنك إلغاء حجز لاعب آخر.");
       return;
     }
+
+    const benchFirst = bench[0];
 
     setTeamSlots((prev) => {
       const updated: TeamSlots = { ...prev };
@@ -464,10 +514,50 @@ const App: React.FC = () => {
             }
           : s
       );
+
+      if (benchFirst) {
+        updated[team] = updated[team].map((s) =>
+          s.key === key
+            ? {
+                ...s,
+                booked: true,
+                playerName: benchFirst.playerName,
+                sessionId: benchFirst.sessionId ?? "",
+              }
+            : s
+        );
+      }
+
       return updated;
     });
 
-    await deleteBookingFromSupabase(team, key);
+    if (benchFirst) {
+      setBench((prev) => prev.filter((b) => b.id !== benchFirst.id));
+    }
+
+    if (!isSupabaseConfigured || !supabase) {
+      return;
+    }
+
+    try {
+      if (benchFirst) {
+        await supabase.from("bookings").upsert(
+          {
+            team,
+            position_key: key,
+            player_name: benchFirst.playerName,
+            session_id: benchFirst.sessionId ?? null,
+          },
+          { onConflict: "team,position_key" }
+        );
+
+        await supabase.from("bench").delete().eq("id", benchFirst.id);
+      } else {
+        await deleteBookingFromSupabase(team, key);
+      }
+    } catch (err) {
+      console.error("Supabase cancel+sub error:", err);
+    }
   };
 
   const handleSwitchTeam = (team: TeamId) => {
@@ -515,7 +605,6 @@ const App: React.FC = () => {
       .map((t) => t.trim())
       .filter(Boolean);
 
-  // حفظ تفاصيل المباراة في Supabase
   const handleSaveMatchSettings = async () => {
     if (!isSupabaseConfigured || !supabase) {
       setMatchSaveMessage("Supabase غير مفعّل، لن يتم الحفظ.");
@@ -565,9 +654,100 @@ const App: React.FC = () => {
     }
   };
 
+  const handleOpenBenchBooking = () => {
+    if (deviceBooking) {
+      alert(
+        "لا يمكنك حجز مقعد احتياط وأنت محجوز في مركز داخل الملعب.\nقم أولاً بإلغاء حجزك الأساسي."
+      );
+      return;
+    }
+    if (deviceBenchEntry) {
+      alert("لديك بالفعل مقعد احتياط مسجل.");
+      return;
+    }
+    setBenchTempName("");
+    setIsBenchModalOpen(true);
+  };
+
+  const handleConfirmBenchBooking = async () => {
+    if (!benchTempName.trim()) return;
+    const name = benchTempName.trim();
+
+    const tempId = Date.now();
+    const newBenchPlayer: BenchPlayer = {
+      id: tempId,
+      playerName: name,
+      sessionId,
+    };
+    setBench((prev) => [...prev, newBenchPlayer]);
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from("bench")
+          .insert({
+            player_name: name,
+            session_id: sessionId ?? null,
+          })
+          .select("id, player_name, session_id")
+          .single();
+
+        if (!error && data) {
+          const row = data as BenchRow;
+          setBench((prev) =>
+            prev.map((b) =>
+              b.id === tempId
+                ? {
+                    id: row.id,
+                    playerName: row.player_name,
+                    sessionId: row.session_id,
+                  }
+                : b
+            )
+          );
+        } else if (error) {
+          console.error("Supabase bench insert error:", error);
+        }
+      } catch (err) {
+        console.error("Supabase bench insert exception:", err);
+      }
+    }
+
+    setBenchTempName("");
+    setIsBenchModalOpen(false);
+  };
+
+  const handleCancelBenchPlayer = async (
+    benchId: number,
+    opts?: { force?: boolean }
+  ) => {
+    const player = bench.find((b) => b.id === benchId);
+    if (!player) return;
+
+    if (
+      !opts?.force &&
+      player.sessionId &&
+      sessionId &&
+      player.sessionId !== sessionId
+    ) {
+      alert("❌ لا يمكنك إلغاء احتياط لاعب آخر.");
+      return;
+    }
+
+    setBench((prev) => prev.filter((b) => b.id !== benchId));
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { error } = await supabase.from("bench").delete().eq("id", benchId);
+        if (error) console.error("Supabase bench delete error:", error);
+      } catch (err) {
+        console.error("Supabase bench delete exception:", err);
+      }
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50">
-      {/* HEADER */}
       <header className="border-b border-slate-800 bg-slate-950/80 sticky top-0 z-20">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -577,8 +757,8 @@ const App: React.FC = () => {
             <div className="flex flex-col">
               <span className="font-semibold">Abo Ameer</span>
               <span className="text-[11px] text-slate-400">
-                تشكيلتين + حجز + لوحة إدارة + Rating & Tags + حالة الدفع +
-                صفحة مشاركة
+                تشكيلتين + حجز + لوحة إدارة + Rating &amp; Tags + حالة الدفع +
+                احتياط مشترك + صفحة مشاركة
               </span>
             </div>
           </div>
@@ -621,16 +801,14 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* ===================== صفحة الحجز ===================== */}
       {viewMode === "booking" && (
         <main className="max-w-6xl mx-auto px-4 py-6 md:py-10">
           <h1 className="text-xl md:text-2xl font-semibold mb-2">
             حجز التشكيلة – فريق أحمر و فريق أخضر
           </h1>
           <p className="text-sm text-slate-400 mb-4">
-            اختر الفريق (أحمر أو أخضر)، ثم احجز مركزك على الملعب. كل حجز يظهر
-            باسم اللاعب أسفل القميص. يتم حفظ البيانات في Supabase إذا تم
-            إعدادها.
+            اختر الفريق (أحمر أو أخضر)، ثم احجز مركزك على الملعب. بعد اكتمال
+            المراكز، عند اعتذار أي لاعب ينزل الاحتياط مكانه مباشرة بالترتيب.
           </p>
 
           <div className="mb-3 text-xs">
@@ -642,6 +820,15 @@ const App: React.FC = () => {
                   {deviceBooking.slot.label}
                 </span>
                 . لإختيار مركز آخر، قم أولاً بإلغاء هذا الحجز.
+              </div>
+            )}
+            {!deviceBooking && deviceBenchEntry && (
+              <div className="inline-flex items-center gap-2 px-3 py-2 rounded-full bg-slate-900 border border-slate-700 text-slate-300">
+                لديك مقعد احتياط محجوز باسم{" "}
+                <span className="font-semibold text-emerald-300">
+                  {deviceBenchEntry.playerName}
+                </span>
+                .
               </div>
             )}
           </div>
@@ -670,7 +857,6 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* شريط الإحصائيات */}
           <div className="flex flex-wrap items-center gap-3 mb-5 text-xs">
             <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-slate-900 border border-slate-800">
               <span className="text-slate-400">الفريق الأحمر:</span>
@@ -693,7 +879,6 @@ const App: React.FC = () => {
           </div>
 
           <section className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)_260px] gap-4">
-            {/* تفاصيل المباراة (عرض فقط) */}
             <aside className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-3 order-2 lg:order-1">
               <h2 className="text-sm font-semibold mb-1">تفاصيل المباراة</h2>
               <div className="space-y-2 text-xs">
@@ -718,7 +903,6 @@ const App: React.FC = () => {
               </div>
             </aside>
 
-            {/* الملعب */}
             <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 order-1 lg:order-2">
               <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
                 <div className="flex items-center gap-2">
@@ -762,9 +946,7 @@ const App: React.FC = () => {
                   const coords = slotCoords[slot.key];
                   const booked = slot.booked;
                   const shirtSrc =
-                    slot.key === "GK"
-                      ? GK_SHIRT_SRC
-                      : currentTeamMeta.shirtSrc;
+                    slot.key === "GK" ? GK_SHIRT_SRC : currentTeamMeta.shirtSrc;
 
                   return (
                     <div
@@ -817,7 +999,6 @@ const App: React.FC = () => {
               </div>
             </section>
 
-            {/* قائمة المراكز السريعة */}
             <aside className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 order-3 lg:order-3">
               <div className="flex items-center justify-between mb-1">
                 <h2 className="text-sm font-semibold">
@@ -858,7 +1039,60 @@ const App: React.FC = () => {
             </aside>
           </section>
 
-          {/* مودال الحجز */}
+          <section className="mt-6 bg-slate-900/60 border border-slate-800 rounded-2xl p-4 text-xs">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex flex-col">
+                <h2 className="text-sm font-semibold">
+                  قائمة الاحتياط (مشتركة بين الفريقين)
+                </h2>
+                <p className="text-[11px] text-slate-400">
+                  عند إلغاء أي لاعب من التشكيلة الأساسية، يتم إدخال أول لاعب من
+                  هذه القائمة مكانه تلقائياً.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleOpenBenchBooking}
+                className="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-500 text-[11px] font-semibold"
+              >
+                حجز مقعد احتياط
+              </button>
+            </div>
+
+            {bench.length === 0 ? (
+              <p className="text-[11px] text-slate-400">
+                لا يوجد لاعبين في قائمة الاحتياط حالياً.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {bench.map((player, index) => (
+                  <li
+                    key={player.id}
+                    className="flex items-center justify-between bg-slate-950/80 border border-slate-800 rounded-xl px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-slate-500">
+                        #{index + 1}
+                      </span>
+                      <span className="font-semibold text-slate-100">
+                        {player.playerName}
+                      </span>
+                    </div>
+                    {canCurrentDeviceCancelBench(player) && (
+                      <button
+                        type="button"
+                        onClick={() => handleCancelBenchPlayer(player.id)}
+                        className="text-[10px] px-3 py-1 rounded-full bg-slate-900 border border-slate-600 hover:border-red-400 hover:text-red-300"
+                      >
+                        إلغاء الاحتياط
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
           {selectedKey && (
             <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30">
               <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-4 space-y-3">
@@ -900,10 +1134,50 @@ const App: React.FC = () => {
               </div>
             </div>
           )}
+
+          {isBenchModalOpen && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-30">
+              <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-4 space-y-3">
+                <h3 className="text-sm font-semibold mb-1">
+                  حجز مقعد احتياط مشترك
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  أدخل اسمك ليتم إضافتك في قائمة الاحتياط. عند توفر مركز سيتم
+                  نقلك تلقائياً إلى الملعب حسب ترتيبك.
+                </p>
+                <input
+                  type="text"
+                  value={benchTempName}
+                  onChange={(e) => setBenchTempName(e.target.value)}
+                  className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs focus:outline-none focus:border-blue-500"
+                  placeholder="مثال: أبو سعود"
+                />
+                <div className="flex justify-end gap-2 text-xs pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsBenchModalOpen(false);
+                      setBenchTempName("");
+                    }}
+                    className="px-3 py-1 rounded-full border border-slate-600 hover:border-slate-400"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmBenchBooking}
+                    disabled={!benchTempName.trim()}
+                    className="px-3 py-1 rounded-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:cursor-not-allowed"
+                  >
+                    تأكيد الحجز
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
       )}
 
-      {/* ===================== لوحة الإدارة ===================== */}
       {viewMode === "admin" && (
         <main className="max-w-6xl mx-auto px-4 py-6 md:py-10">
           <h1 className="text-xl md:text-2xl font-semibold mb-2">
@@ -981,7 +1255,6 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              {/* إعدادات تفاصيل المباراة (تحفظ في Supabase) */}
               <section className="mb-6 bg-slate-900/70 border border-slate-800 rounded-2xl p-4 text-xs max-w-xl">
                 <h2 className="text-sm font-semibold mb-2">
                   إعدادات تفاصيل المباراة
@@ -1205,6 +1478,48 @@ const App: React.FC = () => {
                 })}
               </section>
 
+              <section className="mt-4 bg-slate-900/70 border border-slate-800 rounded-2xl p-4 text-xs max-w-xl">
+                <h2 className="text-sm font-semibold mb-2">
+                  إدارة قائمة الاحتياط
+                </h2>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  يمكن للمسؤول رؤية جميع لاعبي الاحتياط وحذف أي لاعب إذا لزم
+                  الأمر.
+                </p>
+                {bench.length === 0 ? (
+                  <p className="text-[11px] text-slate-500">
+                    لا يوجد لاعبين في قائمة الاحتياط حالياً.
+                  </p>
+                ) : (
+                  <ul className="space-y-2">
+                    {bench.map((player, index) => (
+                      <li
+                        key={player.id}
+                        className="flex items-center justify-between bg-slate-950/80 border border-slate-800 rounded-xl px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-slate-500">
+                            #{index + 1}
+                          </span>
+                          <span className="font-semibold text-slate-100">
+                            {player.playerName}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleCancelBenchPlayer(player.id, { force: true })
+                          }
+                          className="text-[10px] px-3 py-1 rounded-full bg-slate-900 border border-red-500/70 text-red-300 hover:bg-red-500/20"
+                        >
+                          حذف من الاحتياط
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
               <p className="mt-4 text-[11px] text-slate-500">
                 ملاحظة الدفع: حالياً يتم تغيير حالة الدفع يدوياً (غير مدفوع /
                 مدفوع). لربط نظام دفع حقيقي تحتاج Back-end يستقبل Webhooks من
@@ -1215,7 +1530,6 @@ const App: React.FC = () => {
         </main>
       )}
 
-      {/* ===================== صفحة المشاركة ===================== */}
       {viewMode === "share" && (
         <main className="max-w-5xl mx-auto px-4 py-6 md:py-10">
           <h1 className="text-xl md:text-2xl font-semibold mb-2">
@@ -1265,7 +1579,6 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          {/* منطقة التصدير كصورة */}
           <div
             ref={shareRef}
             className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 md:p-6 shadow-2xl max-w-4xl mx-auto"
@@ -1276,7 +1589,7 @@ const App: React.FC = () => {
                   {matchName}
                 </span>
                 <span className="text-slate-400">
-                  {currentTeamMeta.name} • خطة 4–3–1 + حارس
+                  {teamsMeta[selectedTeam].name} • خطة 4–3–1 + حارس
                 </span>
                 <span className="text-slate-500 text-[10px]">
                   {stadiumName} – {matchTime}
@@ -1287,10 +1600,7 @@ const App: React.FC = () => {
                   إجمالي اللاعبين المحجوزين:
                 </span>
                 <span className="font-semibold text-slate-100">
-                  {
-                    teamSlots[selectedTeam].filter((s) => s.booked)
-                      .length
-                  }
+                  {teamSlots[selectedTeam].filter((s) => s.booked).length}
                   /9
                 </span>
               </div>
@@ -1305,10 +1615,10 @@ const App: React.FC = () => {
               }}
             >
               <div className="absolute inset-0 bg-emerald-950/30" />
-              {currentSlots.map((slot) => {
+              {teamSlots[selectedTeam].map((slot) => {
                 const coords = slotCoords[slot.key];
                 const shirtSrc =
-                  slot.key === "GK" ? GK_SHIRT_SRC : currentTeamMeta.shirtSrc;
+                  slot.key === "GK" ? GK_SHIRT_SRC : teamsMeta[selectedTeam].shirtSrc;
                 const booked = slot.booked;
 
                 return (
@@ -1359,6 +1669,13 @@ const App: React.FC = () => {
                 );
               })}
             </div>
+
+            {bench.length > 0 && (
+              <div className="mt-3 text-[10px] text-slate-300">
+                <span className="font-semibold">قائمة الاحتياط:</span>{" "}
+                {bench.map((b, i) => b.playerName).join(" ، ")}
+              </div>
+            )}
 
             <div className="mt-3 text-[10px] text-slate-500 flex items-center justify-between">
               <span>تم إنشاء هذه التشكيلة عبر منصة Abo Ameer.</span>
