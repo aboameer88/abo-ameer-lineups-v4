@@ -105,10 +105,10 @@ const allPositionKeys: BookingPositionKey[] = baseSlots.map((s) => s.key);
 // ====== أماكن المراكز على الملعب (بعد التعديل الأخير لصانع اللعب) ======
 
 const slotCoords: Record<BookingPositionKey, { top: string; left: string }> = {
-  ST: { top: "8%", left: "50%" },
-  CAM: { top: "30%", left: "50%" }, // صانع اللعب نازل شوي عن المهاجم
-  CM1: { top: "42%", left: "32%" },
-  CM2: { top: "42%", left: "68%" },
+  ST: { top: "12%", left: "50%" },
+  CAM: { top: "38%", left: "50%" }, // صانع اللعب نازل شوي عن المهاجم
+  CM1: { top: "35%", left: "27%" },
+  CM2: { top: "35%", left: "74%" },
   LB: { top: "60%", left: "18%" },
   CB1: { top: "64%", left: "38%" },
   CB2: { top: "64%", left: "62%" },
