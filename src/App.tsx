@@ -662,7 +662,7 @@ const App: React.FC = () => {
       return;
     }
     if (deviceBenchEntry) {
-      alert("لديك بالفعل مقعد احتياط مسجل.");
+      alert("لديك بالفعل مقعد احتياط محجوز.");
       return;
     }
     setBenchTempName("");
@@ -743,6 +743,34 @@ const App: React.FC = () => {
       } catch (err) {
         console.error("Supabase bench delete exception:", err);
       }
+    }
+  };
+
+  const handleResetLineup = async () => {
+    if (!isAdminLoggedIn) {
+      alert("هذا الزر متاح للمسؤول فقط.");
+      return;
+    }
+    const sure = window.confirm(
+      "هل أنت متأكد من مسح جميع الحجوزات وقائمة الاحتياط؟ لا يمكن التراجع."
+    );
+    if (!sure) return;
+
+    setTeamSlots(makeInitialTeamSlots());
+    setBench([]);
+
+    if (!isSupabaseConfigured || !supabase) {
+      alert("تم مسح التشكيلة محلياً، لكن Supabase غير مفعّل.");
+      return;
+    }
+
+    try {
+      await supabase.from("bookings").delete().neq("id", 0);
+      await supabase.from("bench").delete().neq("id", 0);
+      alert("✅ تم مسح جميع الحجوزات وقائمة الاحتياط من التشكيلة وقاعدة البيانات.");
+    } catch (err) {
+      console.error("Supabase reset lineup error:", err);
+      alert("⚠️ تم المسح محلياً لكن حدث خطأ أثناء الحذف من Supabase.");
     }
   };
 
@@ -905,7 +933,7 @@ const App: React.FC = () => {
 
             <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 order-1 lg:order-2">
               <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items_center gap-2">
                   <span className="font-semibold">اختيار الفريق المعروض:</span>
                   <div className="flex gap-2">
                     {(["red", "green"] as TeamId[]).map((team) => {
@@ -1185,7 +1213,8 @@ const App: React.FC = () => {
           </h1>
           <p className="text-sm text-slate-400 mb-4">
             هذه الصفحة للمسؤول فقط: تعديل Rating / Tags / الملاحظات / حالة
-            الدفع لكل مركز، بالإضافة إلى إلغاء الحجوزات وإدارة تفاصيل المباراة.
+            الدفع لكل مركز، بالإضافة إلى إلغاء الحجوزات وإدارة تفاصيل المباراة
+            وقائمة الاحتياط.
           </p>
 
           {!isAdminLoggedIn && (
@@ -1242,17 +1271,26 @@ const App: React.FC = () => {
 
           {isAdminLoggedIn && (
             <>
-              <div className="flex items-center justify-between text-xs mb-4">
+              <div className="flex flex-wrap items-center justify-between text-xs mb-4 gap-2">
                 <div className="inline-flex items-center gap-2 px-3 py-2 rounded-full bg-emerald-900/60 border border-emerald-500/60 text-emerald-200">
                   ✅ تم تسجيل الدخول كمسؤول.
                 </div>
-                <button
-                  type="button"
-                  onClick={handleAdminLogout}
-                  className="px-3 py-1.5 rounded-full bg-slate-900 border border-slate-700 hover:border-red-400 text-[11px]"
-                >
-                  تسجيل الخروج
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleResetLineup}
+                    className="px-3 py-1.5 rounded-full bg-red-600 hover:bg-red-500 border border-red-400 text-[11px] font-semibold"
+                  >
+                    مسح التشكيلة بالكامل (الحجوزات + الاحتياط)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAdminLogout}
+                    className="px-3 py-1.5 rounded-full bg-slate-900 border border-slate-700 hover:border-red-400 text-[11px]"
+                  >
+                    تسجيل الخروج
+                  </button>
+                </div>
               </div>
 
               <section className="mb-6 bg-slate-900/70 border border-slate-800 rounded-2xl p-4 text-xs max-w-xl">
@@ -1618,7 +1656,9 @@ const App: React.FC = () => {
               {teamSlots[selectedTeam].map((slot) => {
                 const coords = slotCoords[slot.key];
                 const shirtSrc =
-                  slot.key === "GK" ? GK_SHIRT_SRC : teamsMeta[selectedTeam].shirtSrc;
+                  slot.key === "GK"
+                    ? GK_SHIRT_SRC
+                    : teamsMeta[selectedTeam].shirtSrc;
                 const booked = slot.booked;
 
                 return (
@@ -1673,7 +1713,7 @@ const App: React.FC = () => {
             {bench.length > 0 && (
               <div className="mt-3 text-[10px] text-slate-300">
                 <span className="font-semibold">قائمة الاحتياط:</span>{" "}
-                {bench.map((b, i) => b.playerName).join(" ، ")}
+                {bench.map((b) => b.playerName).join(" ، ")}
               </div>
             )}
 
