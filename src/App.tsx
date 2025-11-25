@@ -86,10 +86,10 @@ const baseSlots: Omit<
 ];
 
 const slotCoords: Record<BookingPositionKey, { top: string; left: string }> = {
-  ST: { top: "8%", left: "50%" },
-  CAM: { top: "30%", left: "50%" },
-  CM1: { top: "42%", left: "32%" },
-  CM2: { top: "42%", left: "68%" },
+  ST: { top: "12%", left: "50%" },
+  CAM: { top: "35%", left: "50%" },
+  CM1: { top: "33%", left: "26%" },
+  CM2: { top: "33%", left: "75%" },
   LB: { top: "60%", left: "18%" },
   CB1: { top: "64%", left: "38%" },
   CB2: { top: "64%", left: "62%" },
