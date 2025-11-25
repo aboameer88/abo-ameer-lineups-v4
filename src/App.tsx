@@ -86,10 +86,10 @@ const baseSlots: Omit<
 ];
 
 const slotCoords: Record<BookingPositionKey, { top: string; left: string }> = {
-  ST: { top: "10%", left: "50%" },
-  CAM: { top: "35%", left: "50%" },
-  CM1: { top: "33%", left: "24%" },
-  CM2: { top: "33%", left: "77%" },
+  ST: { top: "8%", left: "50%" },
+  CAM: { top: "30%", left: "50%" },
+  CM1: { top: "42%", left: "32%" },
+  CM2: { top: "42%", left: "68%" },
   LB: { top: "60%", left: "18%" },
   CB1: { top: "64%", left: "38%" },
   CB2: { top: "64%", left: "62%" },
@@ -232,7 +232,7 @@ const App: React.FC = () => {
     return {
       red: build("red"),
       green: build("green"),
-      totalAll: build("red").bookedCount + build("green").bookedCount,
+      totalAll: build("red").bookedCount + build("green").bookgth,
     };
   }, [teamSlots]);
 
@@ -746,6 +746,303 @@ const App: React.FC = () => {
     }
   };
 
+  const handleMovePlayer = async (
+    fromTeam: TeamId,
+    fromKey: BookingPositionKey,
+    targetTeam: TeamId,
+    targetKey: BookingPositionKey
+  ) => {
+    if (fromTeam === targetTeam && fromKey === targetKey) return;
+
+    const fromSlot = teamSlots[fromTeam].find((s) => s.key === fromKey);
+    const toSlot = teamSlots[targetTeam].find((s) => s.key === targetKey);
+
+    if (!fromSlot || !fromSlot.booked) {
+      alert("لا يوجد لاعب في هذا المركز لنقله.");
+      return;
+    }
+
+    const isSwap = !!(toSlot && toSlot.booked);
+
+    setTeamSlots((prev) => {
+      const next: TeamSlots = {
+        red: prev.red.map((s) => ({ ...s })),
+        green: prev.green.map((s) => ({ ...s })),
+      };
+
+      const fs = next[fromTeam].find((s) => s.key === fromKey)!;
+      const ts = next[targetTeam].find((s) => s.key === targetKey)!;
+
+      if (ts.booked) {
+        const tmp = { ...fs };
+
+        fs.playerName = ts.playerName;
+        fs.rating = ts.rating;
+        fs.tags = ts.tags;
+        fs.note = ts.note;
+        fs.paymentStatus = ts.paymentStatus;
+        fs.sessionId = ts.sessionId;
+        fs.booked = true;
+
+        ts.playerName = tmp.playerName;
+        ts.rating = tmp.rating;
+        ts.tags = tmp.tags;
+        ts.note = tmp.note;
+        ts.paymentStatus = tmp.paymentStatus;
+        ts.sessionId = tmp.sessionId;
+        ts.booked = true;
+      } else {
+        ts.booked = true;
+        ts.playerName = fs.playerName;
+        ts.rating = fs.rating;
+        ts.tags = fs.tags;
+        ts.note = fs.note;
+        ts.paymentStatus = fs.paymentStatus;
+        ts.sessionId = fs.sessionId;
+
+        fs.booked = false;
+        fs.playerName = undefined;
+        fs.rating = null;
+        fs.tags = [];
+        fs.note = "";
+        fs.paymentStatus = "unpaid";
+        fs.sessionId = "";
+      }
+
+      return next;
+    });
+
+    if (!isSupabaseConfigured || !supabase) return;
+
+    try {
+      if (isSwap && toSlot) {
+        await supabase
+          .from("bookings")
+          .upsert(
+            [
+              {
+                team: fromTeam,
+                position_key: fromKey,
+                player_name: toSlot.playerName,
+                rating: toSlot.rating,
+                tags: toSlot.tags,
+                note: toSlot.note,
+                payment_status: toSlot.paymentStatus,
+                session_id: toSlot.sessionId ?? null,
+              },
+              {
+                team: targetTeam,
+                position_key: targetKey,
+                player_name: fromSlot.playerName,
+                rating: fromSlot.rating,
+                tags: fromSlot.tags,
+                note: fromSlot.note,
+                payment_status: fromSlot.paymentStatus,
+                session_id: fromSlot.sessionId ?? null,
+              },
+            ],
+            { onConflict: "team,position_key" }
+          );
+      } else {
+        await supabase.from("bookings").upsert(
+          {
+            team: targetTeam,
+            position_key: targetKey,
+            player_name: fromSlot.playerName,
+            rating: fromSlot.rating,
+            tags: fromSlot.tags,
+            note: fromSlot.note,
+            payment_status: fromSlot.paymentStatus,
+            session_id: fromSlot.sessionId ?? null,
+          },
+          { onConflict: "team,position_key" }
+        );
+
+        await supabase
+          .from("bookings")
+          .delete()
+          .match({ team: fromTeam, position_key: fromKey });
+      }
+    } catch (err) {
+      console.error("Supabase move player error:", err);
+    }
+  };
+
+
+  const handleAutoBalanceByRating = async () => {
+    if (!isAdminLoggedIn) {
+      alert("هذه الميزة متاحة للمسؤول فقط.");
+      return;
+    }
+
+    // نبني نسخة جديدة فارغة من التشكيلة
+    const next: TeamSlots = makeInitialTeamSlots();
+
+    // نحسب مجموع التقييم الحالي لكل فريق مع البناء التدريجي
+    let sumRed = 0;
+    let sumGreen = 0;
+
+    // نجمع اللاعبين حسب المركز (لكل مركز: لاعب في الأحمر ولاعب في الأخضر)
+    type PlayerInfo = {
+      team: TeamId;
+      key: BookingPositionKey;
+      slot: BookingSlot;
+    };
+
+    const byKey: Record<BookingPositionKey, PlayerInfo[]> = {
+      GK: [], LB: [], CB1: [], CB2: [], RB: [], CM1: [], CM2: [], CAM: [], ST: [],
+    };
+
+    (["red", "green"] as TeamId[]).forEach((team) => {
+      teamSlots[team].forEach((slot) => {
+        if (slot.booked) {
+          byKey[slot.key].push({ team, key: slot.key, slot });
+        }
+      });
+    });
+
+    const getRating = (s: BookingSlot | undefined | null) =>
+      s && s.rating != null ? s.rating : 0;
+
+    // نعالج كل مركز لوحده
+    (Object.keys(byKey) as BookingPositionKey[]).forEach((key) => {
+      const players = byKey[key];
+      if (players.length === 0) return;
+
+      if (players.length === 2) {
+        const a = players[0];
+        const b = players[1];
+        const rA = getRating(a.slot);
+        const rB = getRating(b.slot);
+
+        // خيار 1: نبقيهم كما هم (a في فريقه، b في فريقه)
+        let option1Red = sumRed;
+        let option1Green = sumGreen;
+        option1Red += a.team === "red" ? rA : 0;
+        option1Green += a.team === "green" ? rA : 0;
+        option1Red += b.team === "red" ? rB : 0;
+        option1Green += b.team === "green" ? rB : 0;
+        const diff1 = Math.abs(option1Red - option1Green);
+
+        // خيار 2: نعكسهم بين الفريقين
+        let option2Red = sumRed;
+        let option2Green = sumGreen;
+        option2Red += a.team === "green" ? rA : 0;
+        option2Green += a.team === "red" ? rA : 0;
+        option2Red += b.team === "green" ? rB : 0;
+        option2Green += b.team === "red" ? rB : 0;
+        const diff2 = Math.abs(option2Red - option2Green);
+
+        const keepOriginal = diff1 <= diff2;
+
+        const assignSlot = (
+          targetTeam: TeamId,
+          sourceSlot: BookingSlot
+        ) => {
+          next[targetTeam] = next[targetTeam].map((s) =>
+            s.key === key
+              ? {
+                  ...s,
+                  booked: true,
+                  playerName: sourceSlot.playerName,
+                  rating: sourceSlot.rating,
+                  tags: sourceSlot.tags,
+                  note: sourceSlot.note,
+                  paymentStatus: sourceSlot.paymentStatus,
+                  sessionId: sourceSlot.sessionId,
+                }
+              : s
+          );
+        };
+
+        if (keepOriginal) {
+          // a يبقى في فريقه الأصلي، b يبقى في فريقه الأصلي
+          assignSlot(a.team, a.slot);
+          assignSlot(b.team, b.slot);
+          sumRed = option1Red;
+          sumGreen = option1Green;
+        } else {
+          // يتم التبديل بين الفريقين
+          const aTarget = a.team === "red" ? "green" : "red";
+          const bTarget = b.team === "red" ? "green" : "red";
+          assignSlot(aTarget, a.slot);
+          assignSlot(bTarget, b.slot);
+          sumRed = option2Red;
+          sumGreen = option2Green;
+        }
+      } else if (players.length === 1) {
+        const p = players[0];
+        const r = getRating(p.slot);
+
+        // خيار وضعه في الأحمر
+        const diffRed = Math.abs((sumRed + r) - sumGreen);
+        // خيار وضعه في الأخضر
+        const diffGreen = Math.abs(sumRed - (sumGreen + r));
+
+        const targetTeam: TeamId = diffRed <= diffGreen ? "red" : "green";
+
+        next[targetTeam] = next[targetTeam].map((s) =>
+          s.key === key
+            ? {
+                ...s,
+                booked: true,
+                playerName: p.slot.playerName,
+                rating: p.slot.rating,
+                tags: p.slot.tags,
+                note: p.slot.note,
+                paymentStatus: p.slot.paymentStatus,
+                sessionId: p.slot.sessionId,
+              }
+            : s
+        );
+
+        if (targetTeam === "red") {
+          sumRed += r;
+        } else {
+          sumGreen += r;
+        }
+      }
+    });
+
+    setTeamSlots(next);
+
+    if (!isSupabaseConfigured || !supabase) {
+      alert("تم إعادة التوزيع داخلياً فقط (Supabase غير مفعّل).");
+      return;
+    }
+
+    try {
+      await supabase.from("bookings").delete().neq("id", 0);
+
+      const rows: any[] = [];
+      (["red", "green"] as TeamId[]).forEach((team) => {
+        next[team].forEach((slot) => {
+          if (slot.booked && slot.playerName) {
+            rows.push({
+              team,
+              position_key: slot.key,
+              player_name: slot.playerName,
+              rating: slot.rating,
+              tags: slot.tags,
+              note: slot.note,
+              payment_status: slot.paymentStatus,
+              session_id: slot.sessionId ?? null,
+            });
+          }
+        });
+      });
+
+      if (rows.length > 0) {
+        await supabase.from("bookings").insert(rows);
+      }
+
+      alert("✅ تم إعادة توزيع اللاعبين بين الفريقين تلقائياً حسب الـ Rating.");
+    } catch (err) {
+      console.error("Supabase auto-balance error:", err);
+      alert("⚠️ تم التوزيع داخلياً لكن حدث خطأ أثناء الحفظ في Supabase.");
+    }
+  };
+
   const handleResetLineup = async () => {
     if (!isAdminLoggedIn) {
       alert("هذا الزر متاح للمسؤول فقط.");
@@ -786,7 +1083,7 @@ const App: React.FC = () => {
               <span className="font-semibold">Abo Ameer</span>
               <span className="text-[11px] text-slate-400">
                 تشكيلتين + حجز + لوحة إدارة + Rating &amp; Tags + حالة الدفع +
-                احتياط مشترك + صفحة مشاركة
+                احتياط مشترك + نقل بين المراكز + صفحة مشاركة
               </span>
             </div>
           </div>
@@ -933,7 +1230,7 @@ const App: React.FC = () => {
 
             <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 order-1 lg:order-2">
               <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
-                <div className="flex items_center gap-2">
+                <div className="flex items-center gap-2">
                   <span className="font-semibold">اختيار الفريق المعروض:</span>
                   <div className="flex gap-2">
                     {(["red", "green"] as TeamId[]).map((team) => {
@@ -1213,8 +1510,8 @@ const App: React.FC = () => {
           </h1>
           <p className="text-sm text-slate-400 mb-4">
             هذه الصفحة للمسؤول فقط: تعديل Rating / Tags / الملاحظات / حالة
-            الدفع لكل مركز، بالإضافة إلى إلغاء الحجوزات وإدارة تفاصيل المباراة
-            وقائمة الاحتياط.
+            الدفع لكل مركز، بالإضافة إلى إلغاء الحجوزات، إدارة تفاصيل المباراة،
+            التحكم في الاحتياط، ونقل اللاعبين بين المراكز وبين الفريقين.
           </p>
 
           {!isAdminLoggedIn && (
@@ -1490,6 +1787,45 @@ const App: React.FC = () => {
                                         })
                                       }
                                     />
+                                  </div>
+
+                                  <div className="flex flex-col">
+                                    <label className="text-[10px] text-slate-400 mb-1">
+                                      نقل / تبديل لاعب إلى مركز آخر (حتى بين
+                                      الفريقين)
+                                    </label>
+                                    <select
+                                      className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-[11px]"
+                                      defaultValue=""
+                                      onChange={(e) => {
+                                        const value = e.target.value;
+                                        if (!value) return;
+                                        const [tTeam, tKey] = value.split(
+                                          ":"
+                                        ) as [TeamId, BookingPositionKey];
+                                        handleMovePlayer(
+                                          team,
+                                          slot.key,
+                                          tTeam,
+                                          tKey
+                                        );
+                                        e.target.value = "";
+                                      }}
+                                    >
+                                      <option value="">اختر المركز الجديد...</option>
+                                      {(["red", "green"] as TeamId[]).map(
+                                        (t) =>
+                                          baseSlots.map((bs) => (
+                                            <option
+                                              key={`${t}-${bs.key}`}
+                                              value={`${t}:${bs.key}`}
+                                            >
+                                              {teamsMeta[t].name} –{" "}
+                                              {bs.label}
+                                            </option>
+                                          ))
+                                      )}
+                                    </select>
                                   </div>
 
                                   <div className="flex justify-end gap-2 pt-1">
